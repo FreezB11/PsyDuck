@@ -1,0 +1,247 @@
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+import tiktoken
+import numpy as np
+import os
+import requests
+from config import *
+import math
+from data import *
+
+# we get the data set
+# Load training data
+# if not os.path.exists('data/sales_textbook.txt'):
+#     url = 'https://huggingface.co/datasets/goendalf666/sales-textbook_for_convincing_and_selling/raw/main/sales_textbook.txt'
+#     with open('data/sales_textbook.txt', 'w') as f:
+#         f.write(requests.get(url).text)
+
+# with open('data/sales_textbook.txt', 'r', encoding='utf-8') as f:
+#     text = f.read()
+
+# encoding  = tiktoken.get_encoding("cl100k_base")
+# tokenized_text = encoding.encode(text)
+# max_token_val = max(tokenized_text) + 1
+# tokenized_text = torch.tensor(tokenized_text, dtype=torch.long) # device=device)
+
+# split_idx = int(len(tokenized_text) * 0.9) # we will use 90%
+# train_data = tokenized_text[:split_idx]
+# val_data = tokenized_text[split_idx:]
+
+# tokens = np.fromfile("data/train_tokens.bin", dtype=np.uint32)
+# tokens = torch.from_numpy(tokens.astype(np.int64))
+
+# split_idx = int(len(tokens) * 0.9)
+
+# train_data = tokens[:split_idx]
+# val_data = tokens[split_idx:]
+
+# max_token_val = int(tokens.max()) + 1
+
+class FFN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.d_model = d_model
+        self.dropout = dropout
+        self.ffn = nn.Sequential(
+            nn.Linear(in_features=self.d_model, out_features=self.d_model * 4),
+            nn.ReLU(),
+            nn.Linear(in_features=self.d_model * 4, out_features=self.d_model),
+            nn.Dropout(dropout),
+        )
+    def forward(self, x):
+        return self.ffn(x)
+    
+class Attention(nn.Module):
+    def __init__(self, head_size: int):
+        super().__init__()
+        self.d_model = d_model
+        self.head_size = head_size
+        self.context_length = context_length
+        self.dropout = dropout
+
+        self.k = nn.Linear(in_features=self.d_model, out_features=self.head_size, bias=False)
+        self.v = nn.Linear(in_features=self.d_model, out_features=self.head_size, bias=False)
+        self.q = nn.Linear(in_features=self.d_model, out_features=self.head_size, bias=False)
+        self.register_buffer('tril', torch.tril(
+            torch.ones((self.context_length, self.context_length))))
+        self.dropout_layer = nn.Dropout(self.dropout)
+
+    def forward(self, x):
+        B,T,C = x.shape
+        assert T <= self.context_length
+        assert C == self.d_model
+        q = self.q(x)
+        k = self.k(x)
+        v = self.v(x)
+        # scaled dot prod
+        weights = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        # apply mask
+        weights = weights.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+        weights = F.softmax(input=weights, dim=-1)
+        weights = self.dropout_layer(weights)
+
+        out = weights @ v
+        return out
+    
+class MHA(nn.Module):
+    def __init__(self, head_size: int):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.d_model = d_model
+        self.context_length = context_length
+        self.dropout = dropout
+
+        self.heads = nn.ModuleList([Attention(head_size=self.head_size) for _ in range(self.num_heads)])
+        self.projection_layer = nn.Linear(in_features=self.d_model, out_features=self.d_model)
+        self.dropout_layer = nn.Dropout(dropout)
+
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.projection_layer(out)
+        out = self.dropout_layer(out)
+        return out
+    
+class TB(nn.Module):
+    def __init__(self, num_heads: int):
+        super().__init__()
+        self.d_model = d_model
+        self.context_length = context_length
+        self.head_size = d_model // num_heads
+        self.nums_heads = num_heads
+        self.dropout = dropout
+
+        self.mha = MHA(head_size=self.head_size)
+        self.ffn = FFN()
+        self.norm1 = nn.LayerNorm(normalized_shape=self.d_model)
+        self.norm2 = nn.LayerNorm(normalized_shape=self.d_model)
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+
+    def forward(self, x):
+        x = x + self.mha(self.norm1(x))
+        x = x + self.ffn(self.norm2(x))
+        return x
+    
+class LModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.d_model = d_model
+        self.context_length = context_length
+        self.num_heads = num_heads
+        self.num_blocks = num_blocks
+        self.dropout = dropout
+        self.max_token_value = max_token_val
+
+        self.token_em = nn.Embedding(num_embeddings=self.max_token_value, embedding_dim=self.d_model)
+        self.transformer_blocks = nn.Sequential(*(
+            [TB(num_heads=self.num_heads) for _ in range(self.num_blocks)] + [nn.LayerNorm(self.d_model)]
+        ))
+        self.lmoll = nn.Linear(in_features=self.d_model, out_features=self.max_token_value + 1)
+    
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+
+        pelt = torch.zeros(self.context_length, self.d_model)
+        pos = torch.arange(0, self.context_length, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, self.d_model, 2).float() * (-math.log(10000.0)/self.d_model))
+        pelt[:, 0::2] = torch.sin(pos * div_term)
+        pelt[:, 1::2] = torch.cos(pos * div_term)
+
+        pos_em = pelt[:T, :].to(device)
+        x = self.token_em(idx) + pos_em
+        x = self.transformer_blocks(x)
+
+        logits = self.lmoll(x)
+        if targets is not None:
+            B, T, C = logits.shape
+            logits_reshaped = logits.view(B*T, C)
+            targets_reshaped = targets.view(B*T)
+            loss = F.cross_entropy(input=logits_reshaped, target=targets_reshaped)
+        else:
+            loss = None
+        return logits, loss
+    
+    # def generate(self, idx, max_new_token):
+    #     for _ in range(max_new_token):
+    #         idx_corp = idx[:, -self.context_length:]
+    #         logits, loss = self(idx_corp)
+    #         logits_last_timestep = logits[:, -1, :]
+    #         probs = F.softmax(input=logits_last_timestep, dim=-1)
+    #         idx_next = torch.multinomial(input=probs, num_samples=1)
+    #         idx = torch.cat((idx, idx_next), dim=1)
+    #     return idx
+    def generate(self, idx, max_new_token, temperature=1.0, top_k=None):
+        for _ in range(max_new_token):
+            idx_corp = idx[:, -self.context_length:]
+            logits, _ = self(idx_corp)
+
+            logits = logits[:, -1, :] / temperature
+
+            if top_k is not None:
+                v, _ = torch.topk(logits, top_k)
+                logits[logits < v[:, [-1]]] = -float("inf")
+
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, 1)
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        return idx
+    
+model = LModel()
+model = model.to(device)
+
+
+# Get input embedding batch
+def get_batch(split: str):
+    data = train_data if split == 'train' else val_data
+    idxs = torch.randint(low=0, high=len(data) - context_length, size=(batch_size,))
+    x = torch.stack([data[idx:idx + context_length] for idx in idxs])
+    y = torch.stack([data[idx + 1:idx + context_length + 1] for idx in idxs])
+    return x.to(device), y.to(device)
+
+
+# Calculate loss
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ['train', 'valid']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            x_batch, y_batch = get_batch(split)
+            logits, loss = model(x_batch, y_batch)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
+if __name__ == "__main__":
+    # Use AdamW optimizer
+    optimizer = torch.optim.AdamW(params=model.parameters(), lr=learning_rate)
+    tracked_losses = list()
+    for step in range(max_iters):
+        if step % eval_iters == 0 or step == max_iters - 1:
+            losses = estimate_loss()
+            tracked_losses.append(losses)
+            print('Step:', step, 'Training Loss:', round(losses['train'].item(), 3), 'Validation Loss:',
+                round(losses['valid'].item(), 3))
+
+        xb, yb = get_batch('train')
+        logits, loss = model(xb, yb)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+    # Save the model state dictionary
+    torch.save(model.state_dict(), 'model-ckpt.pt')
+
+# # Generate
+# model.eval()
+# start = 'The salesperson'
+# start_ids = encoding.encode(start)
+# x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+# y = model.generate(x, max_new_token=100)
+# print('---------------')
+# print(encoding.decode(y[0].tolist()))
+# print('---------------')
