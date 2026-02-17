@@ -46,6 +46,7 @@ class FFN(nn.Module):
         self.ffn = nn.Sequential(
             nn.Linear(in_features=self.d_model, out_features=self.d_model * 4),
             nn.ReLU(),
+            nn.Linear(in_features=self.d_model * 4, out_features=self.d_model * 4),
             nn.Linear(in_features=self.d_model * 4, out_features=self.d_model),
             nn.Dropout(dropout),
         )
@@ -102,7 +103,103 @@ class MHA(nn.Module):
         out = self.projection_layer(out)
         out = self.dropout_layer(out)
         return out
-    
+
+def precompute_rope_freqs(head_dim, max_seq_len):
+    assert head_dim % 2 == 0, "head_dim must be even"
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    theta = 1.0 / (10000 ** (
+        torch.arange(0, head_dim, 2, device=device).float() / head_dim
+    ))
+
+    positions = torch.arange(max_seq_len, device=device).float()
+
+    freqs = torch.outer(positions, theta)  # (T, head_dim/2)
+
+    return freqs
+def apply_rope(x, freqs):
+    # x shape: (B, T, H, D)
+
+    B, T, H, D = x.shape
+
+    # Move to (B, H, T, D)
+    x = x.permute(0, 2, 1, 3)
+
+    freqs = freqs[:T]  # (T, D/2)
+
+    # reshape for broadcasting
+    freqs = freqs.unsqueeze(0).unsqueeze(0)  # (1,1,T,D/2)
+
+    x1, x2 = x[..., :D//2], x[..., D//2:]
+
+    x = torch.cat([
+        x1 * freqs.cos() - x2 * freqs.sin(),
+        x1 * freqs.sin() + x2 * freqs.cos()
+    ], dim=-1)
+
+    # return to original shape
+    return x.permute(0, 2, 1, 3)
+
+class GQAAttention(nn.Module):
+    def __init__(self, head_size: int):
+        super().__init__()
+
+        self.n_q = num_heads           # query heads
+        self.n_kv = num_heads // 4       # KV heads (smaller)
+        self.head_dim = d_model // self.n_q
+
+        self.q_proj = nn.Linear(d_model, self.n_q * self.head_dim)
+        self.k_proj = nn.Linear(d_model, self.n_kv * self.head_dim)
+        self.v_proj = nn.Linear(d_model, self.n_kv * self.head_dim)
+
+        self.out_proj = nn.Linear(d_model, d_model)
+
+        self.register_buffer(
+            "rope_freqs",
+            precompute_rope_freqs(self.head_dim, context_length),
+            persistent=False,
+        )
+
+    def forward(self, x):
+        B, T, C = x.shape
+
+        q = self.q_proj(x).view(B, T, self.n_q, self.head_dim)
+        k = self.k_proj(x).view(B, T, self.n_kv, self.head_dim)
+        v = self.v_proj(x).view(B, T, self.n_kv, self.head_dim)
+
+        # Apply RoPE
+        q = apply_rope(q, self.rope_freqs)
+        k = apply_rope(k, self.rope_freqs)
+
+        # Expand KV to match Q groups
+        repeat = self.n_q // self.n_kv
+        k = k.repeat_interleave(repeat, dim=2)
+        v = v.repeat_interleave(repeat, dim=2)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        out = F.scaled_dot_product_attention(
+            q, k, v, is_causal=True
+        )
+
+        out = out.transpose(1, 2).contiguous().view(B, T, C)
+        return self.out_proj(out)
+
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization - more stable than LayerNorm"""
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        # x: (B, T, C)
+        norm = x.norm(2, dim=-1, keepdim=True) * (x.size(-1) ** -0.5)
+        return self.weight * x / (norm + self.eps)
+
 class TB(nn.Module):
     def __init__(self, num_heads: int):
         super().__init__()
@@ -112,10 +209,11 @@ class TB(nn.Module):
         self.nums_heads = num_heads
         self.dropout = dropout
 
-        self.mha = MHA(head_size=self.head_size)
+        # self.mha = MHA(head_size=self.head_size)
+        self.mha = GQAAttention(head_size=self.head_size)
         self.ffn = FFN()
-        self.norm1 = nn.LayerNorm(normalized_shape=self.d_model)
-        self.norm2 = nn.LayerNorm(normalized_shape=self.d_model)
+        self.norm1 = RMSNorm(self.d_model)
+        self.norm2 = RMSNorm(self.d_model)
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
 
     def forward(self, x):
@@ -161,16 +259,6 @@ class LModel(nn.Module):
         else:
             loss = None
         return logits, loss
-    
-    # def generate(self, idx, max_new_token):
-    #     for _ in range(max_new_token):
-    #         idx_corp = idx[:, -self.context_length:]
-    #         logits, loss = self(idx_corp)
-    #         logits_last_timestep = logits[:, -1, :]
-    #         probs = F.softmax(input=logits_last_timestep, dim=-1)
-    #         idx_next = torch.multinomial(input=probs, num_samples=1)
-    #         idx = torch.cat((idx, idx_next), dim=1)
-    #     return idx
     def generate(self, idx, max_new_token, temperature=1.0, top_k=None):
         for _ in range(max_new_token):
             idx_corp = idx[:, -self.context_length:]

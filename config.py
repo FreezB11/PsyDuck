@@ -2,9 +2,9 @@ import torch
 
 # Hyperparameters
 batch_size = 16  # How many batches per training step
-context_length = 128  # Length of the token chunk each batch
-d_model = 256  # The size of our model token embeddings
-num_blocks = 12  # Number of transformer blocks
+context_length = 256  # Length of the token chunk each batch
+d_model = 512  # The size of our model token embeddings
+num_blocks = 16  # Number of transformer blocks
 num_heads = 8  # Number of heads in Multi-head attention
 learning_rate = 3e-4  # 0.001
 dropout = 0.1  # Dropout rate
