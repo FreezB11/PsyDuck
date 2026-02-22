@@ -7,8 +7,8 @@ from config import *
 encoding  = tiktoken.get_encoding("cl100k_base")
 
 model = LModel().to(device)
-# model = torch.load("model-ckpt.pt")
-model.load_state_dict(torch.load("214M-4.6.pt", map_location=device))
+model = torch.load("model-ckpt.pt")
+# model.load_state_dict(torch.load("214M-4.6.pt", map_location=device))
 model.eval()
 
 start = 'The'
