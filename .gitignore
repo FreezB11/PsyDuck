@@ -4,3 +4,5 @@ model_60m_16022026.pt
 training.log
 *.pt
 *.zip
+*.bin
+*.bin.meta
