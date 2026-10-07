@@ -64,23 +64,37 @@ print(f"EOS token ID: {EOS_TOKEN_ID}")
 #  max_position_embeddings=512*2, tie_word_embeddings=True)
 # ============================================================
 
+# MODEL_CONFIG = dict(
+#     vocab_size=VOCAB_SIZE,
+
+#     hidden_size=1024,
+#     intermediate_size=1280,
+
+#     num_hidden_layers=12,
+
+#     num_attention_heads=8,
+#     num_key_value_heads=4,
+
+#     max_position_embeddings=512 * 2,
+
+#     rms_norm_eps=1e-5,
+
+#     tie_word_embeddings=True,
+
+#     attn_implementation="sdpa",
+# )
+# 
+ 
 MODEL_CONFIG = dict(
     vocab_size=VOCAB_SIZE,
-
-    hidden_size=1024,
-    intermediate_size=1280,
-
-    num_hidden_layers=12,
-
-    num_attention_heads=8,
-    num_key_value_heads=4,
-
-    max_position_embeddings=512 * 2,
-
+    hidden_size=512,
+    intermediate_size=640,
+    num_hidden_layers=8,
+    num_attention_heads=4,
+    num_key_value_heads=4,          # GQA
+    max_position_embeddings=512,
     rms_norm_eps=1e-5,
-
     tie_word_embeddings=True,
-
     attn_implementation="sdpa",
 )
 

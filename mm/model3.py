@@ -75,12 +75,12 @@ EOS_TOKEN_ID = tok.eos_token_id
 # ----------------------------
 MODEL_CONFIG = dict(
     vocab_size=VOCAB_SIZE,
-    hidden_size=512*2,
-    intermediate_size=1280,
-    num_hidden_layers=12,
-    num_attention_heads=8,
+    hidden_size=512,
+    intermediate_size=640,
+    num_hidden_layers=8,
+    num_attention_heads=4,
     num_key_value_heads=4,          # GQA
-    max_position_embeddings=512 * 2,
+    max_position_embeddings=512,
     rms_norm_eps=1e-5,
     tie_word_embeddings=True,
     attn_implementation="sdpa",
@@ -101,7 +101,7 @@ BLOCK_SIZE = 512
 # it. A probe step below will auto-halve this (and compensate with
 # GRAD_ACCUM_STEPS) if it doesn't fit, so this is a safe starting value
 # to try first rather than a guaranteed-safe one.
-BATCH_SIZE = 16
+BATCH_SIZE = 32
 GRAD_ACCUM_STEPS = 1             # effective batch size = 12 * 4 = 48
 LR = 3e-4
 EPOCHS = 3
